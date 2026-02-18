@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>Finger Pinch Game - Header Guide Edition</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; background: #000; font-family: 'Helvetica Neue', Arial, sans-serif; }
+        #container { position: relative; width: 100vw; height: 100vh; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; transform: scaleX(-1); }
+        
+        #ui-layer { 
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; 
+            pointer-events: none; z-index: 10;
+        }
+        
+        /* ヘッダー内にガイドを統合 */
+        .header-ui { 
+            display: flex; justify-content: space-between; align-items: center;
+            background: rgba(0,0,0,0.85); height: 80px; width: 100%;
+            border-bottom: 3px solid #0f0; color: #0f0; font-weight: bold;
+            padding: 0 20px; box-sizing: border-box;
+        }
+        .ui-section { font-size: 24px; }
+        .val-text { color: #fff; margin-left: 8px; }
+
+        .guide-inline {
+            display: flex; gap: 15px; background: rgba(0,255,0,0.1);
+            padding: 8px 15px; border-radius: 10px; border: 1px solid #0f0;
+            font-size: 18px; color: #fff;
+        }
+        .guide-item { color: #0f0; }
+        .guide-item span { color: #fff; font-weight: normal; margin-right: 5px; }
+        
+        #msg { 
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
+            text-align: center; font-size: 45px; color: #fff; text-shadow: 0 0 15px #f00;
+            background: rgba(0,0,0,0.8); padding: 30px; border-radius: 20px; border: 3px solid #fff;
+        }
+    </style>
+</head>
+<body>
+
+<div id="container">
+    <video id="input_video" style="display:none;"></video>
+    <canvas id="output_canvas"></canvas>
+    <div id="ui-layer">
+        <div class="header-ui">
+            <div class="ui-section">SCORE: <span id="score" class="val-text">0</span></div>
+            
+            <div class="guide-inline">
+                <div class="guide-item"><span>1:</span>人差指</div>
+                <div class="guide-item"><span>2:</span>中指</div>
+                <div class="guide-item"><span>3:</span>薬指</div>
+                <div class="guide-item"><span>4:</span>小指</div>
+            </div>
+
+            <div class="ui-section">TIME: <span id="timer" class="val-text">60</span></div>
+        </div>
+        <div id="msg">カメラを起動中...</div>
+    </div>
+</div>
+
+<script>
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const timerEl = document.getElementById('timer');
+    const msgEl = document.getElementById('msg');
+
+    let score = 0;
+    let currentIndex = 0;
+    let gameStarted = false;
+    let startTime = 0;
+    const gameDuration = 60;
+    let circles = [];
+    
+    // 配置設定
+    const COLS = 6;
+    const ROWS = 4;
+    const UI_MARGIN_TOP = 100; // ヘッダー分を確保
+    const UI_MARGIN_BOTTOM = 30; 
+
+    let currentCircleR = 40;
+    let currentFontSize = 35;
+    let lastNumberFromPreviousScreen = -1;
+
+    // ピンチ判定の距離閾値
+    const PINCH_THRESHOLD = 0.06; 
+
+    const synth = window.speechSynthesis;
+    function speak(text) {
+        if (synth.speaking) synth.cancel();
+        const uttr = new SpeechSynthesisUtterance(text);
+        uttr.lang = 'ja-JP';
+        synth.speak(uttr);
+    }
+
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function beep() {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.frequency.value = 1150;
+        gain.gain.value = 0.05;
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.06);
+    }
+
+    function getDistance(p1, p2) {
+        return Math.sqrt(Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2) + Math.pow(p1.z - p2.z, 2));
+    }
+
+    function initCircles() {
+        circles = [];
+        const width = window.innerWidth;
+        const availableHeight = window.innerHeight - UI_MARGIN_TOP - UI_MARGIN_BOTTOM;
+        
+        const stepX = width / (COLS + 1);
+        const stepY = availableHeight / (ROWS + 1);
+
+        // 特大サイズに戻す (0.45倍)
+        currentCircleR = Math.min(stepX, stepY) * 0.45;
+        currentFontSize = currentCircleR * 1.2; 
+
+        let trackingLastNum = lastNumberFromPreviousScreen;
+
+        for (let r = 0; r < ROWS; r++) {
+            for (let c = 0; c < COLS; c++) {
+                let num;
+                do {
+                    num = Math.floor(Math.random() * 4) + 1;
+                } while (num === trackingLastNum);
+                
+                trackingLastNum = num;
+
+                circles.push({
+                    x: width - (stepX * (c + 1)), 
+                    y: UI_MARGIN_TOP + (stepY * (r + 1)),
+                    val: num,
+                    cleared: false
+                });
+            }
+        }
+        lastNumberFromPreviousScreen = trackingLastNum;
+    }
+
+    function onResults(results) {
+        if (canvasElement.width !== window.innerWidth || canvasElement.height !== window.innerHeight) {
+            canvasElement.width = window.innerWidth;
+            canvasElement.height = window.innerHeight;
+            if (gameStarted) initCircles();
+        }
+
+        canvasCtx.save();
+        canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+        canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+        let detectedPinch = -1;
+        let startTrigger = false;
+
+        if (results.multiHandLandmarks) {
+            for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                const landmarks = results.multiHandLandmarks[i];
+                const thumbTip = landmarks[4];
+                const fingerTips = [landmarks[8], landmarks[12], landmarks[16], landmarks[20]];
+                
+                const distances = fingerTips.map(tip => getDistance(thumbTip, tip));
+                const touching = distances.map(d => d < PINCH_THRESHOLD);
+                const touchCount = touching.filter(t => t).length;
+
+                // 条件：指1本だけが親指と接触していること
+                if (touchCount === 1) {
+                    detectedPinch = touching.indexOf(true) + 1;
+                }
+
+                if (landmarks[0].y < 0.25) startTrigger = true; 
+
+                drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
+            }
+        }
+
+        if (!gameStarted) {
+            msgEl.style.display = "block";
+            msgEl.innerHTML = "手を高く挙げて<br>スタート！";
+            if (startTrigger) {
+                lastNumberFromPreviousScreen = -1;
+                startGame();
+            }
+        } else {
+            updateGame(detectedPinch);
+        }
+        canvasCtx.restore();
+    }
+
+    function startGame() {
+        gameStarted = true;
+        score = 0;
+        currentIndex = 0;
+        startTime = Date.now();
+        initCircles();
+        msgEl.style.display = "none";
+        speak("スタート");
+    }
+
+    function updateGame(activePinch) {
+        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+        const remaining = Math.max(0, gameDuration - elapsed);
+        
+        timerEl.innerText = remaining;
+        scoreEl.innerText = score;
+
+        if (remaining <= 0) {
+            gameStarted = false;
+            msgEl.style.display = "block";
+            msgEl.innerHTML = `終了！<br>SCORE: ${score}<br><span style="font-size:25px">手を挙げてリスタート</span>`;
+            speak(`終了。${score}点でした。`);
+            return;
+        }
+
+        if (currentIndex < circles.length) {
+            if (activePinch === circles[currentIndex].val) {
+                circles[currentIndex].cleared = true;
+                score++;
+                currentIndex++;
+                beep();
+                
+                if (currentIndex === circles.length) {
+                    initCircles();
+                    currentIndex = 0;
+                }
+            }
+        }
+
+        circles.forEach((c, idx) => {
+            if (c.cleared) return;
+            const isTarget = (idx === currentIndex);
+            
+            canvasCtx.beginPath();
+            canvasCtx.arc(c.x, c.y, currentCircleR, 0, Math.PI * 2);
+            canvasCtx.fillStyle = isTarget ? "rgba(255, 255, 0, 0.95)" : "rgba(255, 0, 0, 0.65)";
+            canvasCtx.fill();
+            canvasCtx.strokeStyle = "#fff";
+            canvasCtx.lineWidth = isTarget ? 7 : 2;
+            canvasCtx.stroke();
+            
+            canvasCtx.save();
+            canvasCtx.translate(c.x, c.y);
+            canvasCtx.scale(-1, 1); 
+            canvasCtx.fillStyle = isTarget ? "#000" : "#fff";
+            canvasCtx.font = `bold ${currentFontSize}px Arial`;
+            canvasCtx.textAlign = "center";
+            canvasCtx.textBaseline = "middle";
+            canvasCtx.fillText(c.val, 0, 0);
+            canvasCtx.restore();
+        });
+    }
+
+    const hands = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.7,
+        minTrackingConfidence: 0.7
+    });
+    hands.onResults(onResults);
+
+    const camera = new Camera(videoElement, {
+        onFrame: async () => {
+            await hands.send({image: videoElement});
+        },
+        width: 1280,
+        height: 720
+    });
+    camera.start();
+
+    window.addEventListener('resize', () => {
+        if (gameStarted) initCircles();
+    });
+
+</script>
+</body>
+</html>
